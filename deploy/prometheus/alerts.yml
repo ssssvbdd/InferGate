@@ -1,0 +1,21 @@
+groups:
+  - name: infergate
+    rules:
+      - alert: InferGateDown
+        expr: up{job="infergate"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: InferGate metrics endpoint is unavailable
+      - alert: InferGateOptimizerLostRuntimeSignals
+        expr: gateway_optimizer_runtime_scrape_success == 0 or optimizer_gateway_scrape_success == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Optimizer cannot read gateway or vLLM metrics
+      - alert: InferGateHighErrorRatio
+        expr: sum(rate(infergate_requests_total{status="error"}[5m])) / clamp_min(sum(rate(infergate_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: InferGate error ratio is above 5 percent

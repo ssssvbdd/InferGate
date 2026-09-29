@@ -1,0 +1,14 @@
+bin/
+run/
+.env
+config/keys.json
+config/cache-salt.key
+config/gateway.env
+config/optimizer.env
+config/optimizer-policy.json
+__pycache__/
+*.pyc
+**/tests/_scratch/
+**/results/
+.idea/
+.vscode/

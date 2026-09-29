@@ -1,0 +1,22 @@
+[Unit]
+Description=InferGate inference gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/infergate
+EnvironmentFile=-/opt/infergate/config/gateway.env
+ExecStartPre=/usr/bin/test -r /opt/infergate/config/keys.json
+ExecStartPre=/usr/bin/test -r /opt/infergate/config/cache-salt.key
+ExecStart=/opt/infergate/bin/infergate -conf config/gateway.yaml -models config/models.yaml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-/opt/infergate/run
+
+[Install]
+WantedBy=multi-user.target

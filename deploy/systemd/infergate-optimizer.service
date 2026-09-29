@@ -1,0 +1,18 @@
+[Unit]
+Description=InferGate observe-only optimizer
+After=infergate.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/infergate/services/optimizer
+EnvironmentFile=/opt/infergate/config/optimizer.env
+ExecStart=/usr/bin/python3 server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

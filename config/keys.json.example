@@ -1,0 +1,10 @@
+{
+  "keys": [
+    {
+      "tenant": "local",
+      "sha256": "REPLACE_WITH_SHA256_FROM_CREATE_KEY_SCRIPT",
+      "rpm": 60,
+      "concurrency": 2
+    }
+  ]
+}

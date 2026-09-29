@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ssssvbdd/InferGate/main/contracts/optimization-policy.schema.json",
+  "title": "Observe-only optimization policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "long_prompt_tokens", "long_output_tokens", "high_in_flight", "kv_cache_pressure", "recommendation_hold_seconds", "baseline_profile", "capacity_profile", "scheduler_profile"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "mode": {"const": "observe"},
+    "long_prompt_tokens": {"type": "integer", "minimum": 1},
+    "long_output_tokens": {"type": "integer", "minimum": 1},
+    "high_in_flight": {"type": "integer", "minimum": 1},
+    "kv_cache_pressure": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+    "recommendation_hold_seconds": {"type": "integer", "minimum": 0},
+    "baseline_profile": {"type": "string", "pattern": "^[a-zA-Z0-9_.-]{1,64}$"},
+    "capacity_profile": {"type": "string", "pattern": "^[a-zA-Z0-9_.-]{1,64}$"},
+    "scheduler_profile": {"type": "string", "pattern": "^[a-zA-Z0-9_.-]{1,64}$"}
+  }
+}

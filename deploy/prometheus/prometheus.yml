@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: infergate
+    static_configs:
+      - targets: ["127.0.0.1:6060"]
+  - job_name: infergate-optimizer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8091"]
+  - job_name: vllm
+    static_configs:
+      - targets: ["127.0.0.1:8000"]

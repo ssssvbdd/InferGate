@@ -1,0 +1,23 @@
+models:
+  - name: local-model
+    version: default
+    model_type: llm
+    provider_type: generic
+    provider_model: local-model
+    credential:
+      api_key_env: VLLM_API_KEY
+    discovery: static
+    load_balance: direct
+    endpoints:
+      - id: local-vllm
+        host: 127.0.0.1
+        port: 8000
+        scheme: http
+        weight: 1
+        metadata:
+          allow_internal: "true"
+    plugins:
+      - tracing
+      - access_log
+    timeout: 120s
+    max_retries: 0

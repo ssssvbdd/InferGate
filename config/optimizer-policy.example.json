@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "mode": "observe",
+  "long_prompt_tokens": 2048,
+  "long_output_tokens": 256,
+  "high_in_flight": 6,
+  "kv_cache_pressure": 0.85,
+  "recommendation_hold_seconds": 300,
+  "baseline_profile": "bf16-memory-085",
+  "capacity_profile": "bf16-memory-090",
+  "scheduler_profile": "batched-tokens-2048"
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ssssvbdd/InferGate/main/contracts/experiment-manifest.schema.json",
+  "title": "Inference experiment promotion evidence",
+  "type": "object",
+  "required": ["schema_version", "status", "auto_apply", "candidate_profile", "workload_fingerprint", "evidence", "gates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"enum": ["eligible_for_review", "rejected"]},
+    "auto_apply": {"const": false},
+    "candidate_profile": {"type": "string"},
+    "workload_fingerprint": {"type": "string", "minLength": 1},
+    "evidence": {"type": "object"},
+    "gates": {"type": "object"}
+  }
+}
