@@ -11,6 +11,7 @@ import (
 // Option 是重试配置。
 type Option struct {
 	MaxRetries int
+	RetryIf    func(error) bool
 	// BaseDelay 线性递增基准延迟。
 	BaseDelay time.Duration
 }
@@ -44,7 +45,11 @@ func WithRetry[T any](ctx context.Context, opt Option, fn func(ctx context.Conte
 			return out, nil
 		}
 		lastErr = err
-		if !gwerr.IsRetryable(err) {
+		shouldRetry := gwerr.IsRetryable
+		if opt.RetryIf != nil {
+			shouldRetry = opt.RetryIf
+		}
+		if !shouldRetry(err) {
 			return zero, err
 		}
 		if ctx.Err() != nil {

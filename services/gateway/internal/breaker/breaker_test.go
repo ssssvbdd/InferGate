@@ -56,3 +56,20 @@ func TestCircuitBreaker_StateMachine(t *testing.T) {
 	}
 	_ = upstreamErr
 }
+
+func TestHalfOpenAdmitsOneProbe(t *testing.T) {
+	cb := New(Config{FailureWindow: time.Second, MaxFailCount: 1, RecoveryInterval: 20 * time.Millisecond})
+	defer cb.Close()
+	cb.RecordFailure("ep")
+	if cb.TryAcquire("ep") {
+		t.Fatal("open endpoint admitted before recovery interval")
+	}
+	time.Sleep(25 * time.Millisecond)
+	if !cb.TryAcquire("ep") || cb.TryAcquire("ep") {
+		t.Fatal("half-open must admit exactly one concurrent probe")
+	}
+	cb.Record("ep", gwerr.ErrInvalidRequest)
+	if cb.State("ep") != StateOpen {
+		t.Fatal("inconclusive probe must return to open")
+	}
+}

@@ -1,5 +1,7 @@
 bin/
 run/
+docs/
+config/model-deliveries/*.lock.json
 .env
 config/keys.json
 config/cache-salt.key

@@ -74,28 +74,34 @@ func (g *Gateway) StreamForwardRequest(ctx context.Context, req *model.Request) 
 
 	timing := metrics.TimingMetrics{StartTime: time.Now()}
 	metrics.IncConcurrency(mc.Name)
+	streamCtx, cancel := context.WithCancel(ctx)
 
 	hooks := g.newHooks(mc)
-	mp, err := provider.NewModelProvider(ctx, provider.Instance{
+	mp, err := provider.NewModelProvider(streamCtx, provider.Instance{
 		Endpoint: sel.Endpoint,
 		Model:    mc,
 	}, hooks)
 	if err != nil {
+		cancel()
 		sel.Release(ctx)
 		metrics.DecConcurrency(mc.Name)
+		g.selectorManager.RecordResult(sel.CBKey(), err)
 		return nil, nil, err
 	}
 
-	upstream, err := mp.StreamRequest(ctx, req)
+	upstream, err := mp.StreamRequest(streamCtx, req)
 	if err != nil {
+		cancel()
 		sel.Release(ctx)
 		metrics.DecConcurrency(mc.Name)
+		g.selectorManager.RecordResult(sel.CBKey(), err)
 		return nil, nil, err
 	}
 
 	out := make(chan *model.StreamChunk, 32)
 	go func() {
 		defer close(out)
+		defer cancel()
 		var firstToken bool
 		var streamErr error
 		for chunk := range upstream {
@@ -112,9 +118,12 @@ func (g *Gateway) StreamForwardRequest(ctx context.Context, req *model.Request) 
 			}
 			select {
 			case out <- chunk:
-			case <-ctx.Done():
-				streamErr = gwerr.ErrTimeout.WithCause(ctx.Err())
+			case <-streamCtx.Done():
+				streamErr = gwerr.ErrTimeout.WithCause(streamCtx.Err())
 			}
+		}
+		if streamErr == nil && streamCtx.Err() != nil {
+			streamErr = gwerr.ErrTimeout.WithCause(streamCtx.Err())
 		}
 		// 上报。
 		timing.EndTime = time.Now()
@@ -130,6 +139,6 @@ func (g *Gateway) StreamForwardRequest(ctx context.Context, req *model.Request) 
 		metrics.Report(dim, timing)
 	}()
 
-	cleanup := func() { sel.Release(ctx) }
+	cleanup := func() { cancel(); sel.Release(context.Background()) }
 	return out, cleanup, nil
 }

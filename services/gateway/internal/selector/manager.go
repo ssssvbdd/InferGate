@@ -2,6 +2,7 @@ package selector
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -44,17 +45,26 @@ func NewManager(disc *discovery.Manager, cb *breaker.CircuitBreaker, rdb *redis.
 
 // Selection 是一次选择结果，用于后续释放资源与熔断记录。
 type Selection struct {
-	Endpoint  model.Endpoint
-	selector  Selector
-	modelName string
-	cbKey     string
+	Endpoint         model.Endpoint
+	selector         Selector
+	modelName        string
+	cbKey            string
+	admissionRelease func()
+	releaseOnce      sync.Once
 }
+
+func (s *Selection) SetAdmissionRelease(release func()) { s.admissionRelease = release }
 
 // Release 释放本次选择占用的资源。
 func (s *Selection) Release(ctx context.Context) {
-	if s.selector != nil {
-		s.selector.Release(ctx, s.modelName, s.Endpoint)
-	}
+	s.releaseOnce.Do(func() {
+		if s.admissionRelease != nil {
+			s.admissionRelease()
+		}
+		if s.selector != nil {
+			s.selector.Release(ctx, s.modelName, s.Endpoint)
+		}
+	})
 }
 
 // CBKey 返回熔断器键。
@@ -83,8 +93,7 @@ func (m *Manager) Select(ctx context.Context, mc *model.ModelConfig) (*Selection
 		}
 	}
 	if len(healthy) == 0 {
-		// 全部熔断，兜底放行首个（半开探测）。
-		healthy = eps[:1]
+		return nil, gwerr.ErrNoInstance
 	}
 
 	// 3) 负载均衡选择。
@@ -93,17 +102,26 @@ func (m *Manager) Select(ctx context.Context, mc *model.ModelConfig) (*Selection
 	if !ok {
 		sel = m.selectors[model.LBWeighted]
 	}
-	ep, err := sel.Select(ctx, mc.Name, healthy)
-	if err != nil {
-		return nil, gwerr.ErrNoInstance.WithCause(err)
+	for len(healthy) > 0 {
+		ep, err := sel.Select(ctx, mc.Name, healthy)
+		if err != nil {
+			return nil, gwerr.ErrNoInstance.WithCause(err)
+		}
+		key := cbKey(mc.Name, ep)
+		if m.breaker == nil || m.breaker.TryAcquire(key) {
+			return &Selection{Endpoint: ep, selector: sel, modelName: mc.Name, cbKey: key}, nil
+		}
+		// The candidate became unavailable after filtering. Do not retain any
+		// selector reservation while trying a different endpoint.
+		sel.Release(ctx, mc.Name, ep)
+		for i := range healthy {
+			if cbKey(mc.Name, healthy[i]) == key {
+				healthy = append(healthy[:i], healthy[i+1:]...)
+				break
+			}
+		}
 	}
-
-	return &Selection{
-		Endpoint:  ep,
-		selector:  sel,
-		modelName: mc.Name,
-		cbKey:     cbKey(mc.Name, ep),
-	}, nil
+	return nil, gwerr.ErrNoInstance
 }
 
 // RecordResult 根据请求结果更新熔断状态。

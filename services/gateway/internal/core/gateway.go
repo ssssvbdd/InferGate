@@ -3,8 +3,12 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"time"
 
+	"github.com/ssssvbdd/InferGate/services/gateway/internal/gwerr"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/limiter"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/metrics"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/model"
@@ -23,6 +27,7 @@ type Gateway struct {
 	limiterFactory  *limiter.Factory
 	selectorManager *selector.Manager
 	upstreamTimeout time.Duration
+	admission       *localAdmission
 }
 
 // Option 是 Gateway 选项。
@@ -49,6 +54,7 @@ func NewGateway(opts ...Option) *Gateway {
 	g := &Gateway{
 		validator:       validator.New(),
 		upstreamTimeout: 3 * time.Second,
+		admission:       newLocalAdmission(),
 	}
 	for _, o := range opts {
 		o(g)
@@ -100,12 +106,37 @@ func (g *Gateway) prepare(ctx context.Context, req *model.Request) (*model.Model
 	if err != nil {
 		return nil, nil, err
 	}
+	if mc.ModelType == model.ModelTypeLLM {
+		requestedOutput := 256 // reserve capacity when the caller omits max_tokens
+		if req.MaxTokens != nil {
+			requestedOutput = *req.MaxTokens
+		}
+		if req.MaxCompletionTokens != nil && *req.MaxCompletionTokens > requestedOutput {
+			requestedOutput = *req.MaxCompletionTokens
+		}
+		if mc.MaxOutputTokens > 0 && requestedOutput > mc.MaxOutputTokens {
+			return nil, nil, gwerr.New("output_limit", gwerr.TypeInvalidRequest, 400,
+				fmt.Sprintf("requested output exceeds model limit of %d tokens", mc.MaxOutputTokens))
+		}
+		if mc.MaxContextTokens > 0 && model.EstimatedPromptTokens(req)+requestedOutput > mc.MaxContextTokens {
+			return nil, nil, gwerr.New("context_limit", gwerr.TypeInvalidRequest, 400,
+				"estimated prompt and output exceed model context; shorten the input")
+		}
+	}
 
 	// 实例选择。
 	sel, err := g.selectorManager.Select(ctx, mc)
 	if err != nil {
 		return nil, nil, err
 	}
+	release, err := g.admission.acquire(ctx, mc.Name, sel.Endpoint.ID,
+		mc.MaxInFlight, sel.Endpoint.MaxInFlight, mc.MaxWaiting, mc.WaitTimeout)
+	if err != nil {
+		sel.Release(ctx)
+		g.selectorManager.RecordResult(sel.CBKey(), err)
+		return nil, nil, err
+	}
+	sel.SetAdmissionRelease(release)
 	return mc, sel, nil
 }
 
@@ -125,6 +156,13 @@ func retryOption(mc *model.ModelConfig) retry.Option {
 	// Zero is the safe default: an inference request may already consume GPU
 	// work or bill tokens before a transport error becomes visible.
 	opt.MaxRetries = mc.MaxRetries
+	// Generative POSTs can have reached the model even when the response is
+	// lost. Retry only a connection-establishment failure, before any body is
+	// sent. vLLM does not provide a gateway-wide idempotency ledger.
+	opt.RetryIf = func(err error) bool {
+		var netErr *net.OpError
+		return errors.As(err, &netErr) && netErr.Op == "dial"
+	}
 	return opt
 }
 

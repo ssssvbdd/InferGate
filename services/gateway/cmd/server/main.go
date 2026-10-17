@@ -1,4 +1,4 @@
-// Command server 是 infergate 的主入口。
+// Command server 是 InferGate 的主入口。
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/health"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/limiter"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/log"
+	"github.com/ssssvbdd/InferGate/services/gateway/internal/metrics"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/model"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/registry"
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/router"
@@ -55,6 +57,9 @@ func main() {
 	// 初始化 Redis（可选）。
 	if cfg.Redis.Enabled && cfg.Redis.Addr != "" {
 		if err := store.InitRedis(cfg.Redis); err != nil {
+			if cfg.Auth.Distributed || cfg.Usage.RedisStream != "" {
+				panic(err)
+			}
 			log.Warn("redis init failed, running in degraded mode", zap.Error(err))
 		}
 	}
@@ -73,12 +78,48 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if cfg.Auth.Distributed {
+		if err := authManager.UseRedisQuota(rdb, cfg.Auth.QuotaNamespace, cfg.Auth.LeaseTTL); err != nil {
+			panic(err)
+		}
+	}
 	ledger, err := usage.Open(cfg.Usage.LedgerFile)
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = ledger.Close() }()
-	checker := health.New(cfg.Readiness.URL, cfg.Readiness.Timeout)
+	var stopDelivery context.CancelFunc
+	var deliveryDone chan struct{}
+	if cfg.Usage.RedisStream != "" {
+		if err := ledger.EnableRedis(rdb, cfg.Usage.RedisStream); err != nil {
+			panic(err)
+		}
+		prometheus.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: "infergate", Name: "usage_pending_bytes", Help: "Local usage journal bytes awaiting central delivery.",
+		}, func() float64 { return float64(ledger.PendingBytes()) }))
+		deliveryCtx, cancel := context.WithCancel(context.Background())
+		stopDelivery = cancel
+		deliveryDone = make(chan struct{})
+		go func() {
+			defer close(deliveryDone)
+			ledger.RunDelivery(deliveryCtx, func(err error) {
+				metrics.ReportUsageDeliveryFailure()
+				log.Error("central usage delivery failed", zap.Error(err))
+			})
+		}()
+	}
+	readinessURLs := cfg.Readiness.URLs
+	if len(readinessURLs) == 0 {
+		readinessURLs = []string{cfg.Readiness.URL}
+	}
+	checker := health.NewAny(readinessURLs, cfg.Readiness.Timeout)
+	if cfg.Auth.Distributed {
+		checker.WithDependency(func(ctx context.Context) bool {
+			probeCtx, cancel := context.WithTimeout(ctx, cfg.Readiness.Timeout)
+			defer cancel()
+			return rdb.Ping(probeCtx).Err() == nil
+		})
+	}
 
 	// 启动监控端口。
 	if cfg.Metrics.Enabled {
@@ -93,10 +134,13 @@ func main() {
 	// 启动主 HTTP 服务。
 	engine := setupHTTPServer(gw, authManager, reg, ledger, checker)
 	srv := &http.Server{
-		Addr:         cfg.Server.Addr,
-		Handler:      engine,
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
+		Addr:              cfg.Server.Addr,
+		Handler:           engine,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
 
 	go func() {
@@ -117,6 +161,13 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("graceful shutdown failed", zap.Error(err))
+	}
+	if stopDelivery != nil {
+		stopDelivery()
+		<-deliveryDone
+		if _, err := ledger.DeliverPending(shutdownCtx); err != nil {
+			log.Error("usage outbox has pending events", zap.Error(err))
+		}
 	}
 	_ = store.Close()
 	log.Info("bye")
@@ -182,7 +233,7 @@ func setupHTTPServer(gw *core.Gateway, authManager *auth.Manager, reg *registry.
 	ledger *usage.Ledger, checker *health.Checker) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(api.RecoveryMiddleware(), api.RequestIDMiddleware(), api.TracingMiddleware(), api.AccessLogMiddleware())
+	engine.Use(api.RequestIDMiddleware(), api.TracingMiddleware(), api.AccessLogMiddleware(), api.RecoveryMiddleware())
 	api.NewHandler(gw, authManager, reg, ledger, checker).RegisterRoutes(engine)
 	return engine
 }

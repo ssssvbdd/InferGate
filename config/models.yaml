@@ -1,9 +1,9 @@
 models:
-  - name: local-model
+  - name: qwen3-4b
     version: default
     model_type: llm
     provider_type: generic
-    provider_model: local-model
+    provider_model: qwen3-4b
     credential:
       api_key_env: VLLM_API_KEY
     discovery: static
@@ -11,13 +11,20 @@ models:
     endpoints:
       - id: local-vllm
         host: 127.0.0.1
-        port: 8000
+        port: 8001
         scheme: http
         weight: 1
+        max_in_flight: 4
         metadata:
           allow_internal: "true"
     plugins:
       - tracing
       - access_log
     timeout: 120s
+    stream_idle_timeout: 90s
     max_retries: 0
+    max_in_flight: 4
+    max_waiting: 8
+    wait_timeout: 2s
+    max_context_tokens: 8192
+    max_output_tokens: 1024

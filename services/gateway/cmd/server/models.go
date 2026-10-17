@@ -31,6 +31,20 @@ func loadModels(path string) ([]model.ModelConfig, error) {
 	// 填充默认值。
 	for i := range mf.Models {
 		m := &mf.Models[i]
+		if m.Name == "" || m.ProviderModel == "" || m.MaxContextTokens < 0 || m.MaxOutputTokens < 0 || m.MaxRetries < 0 || m.StreamIdleTimeout < 0 || m.MaxInFlight < 0 || m.MaxWaiting < 0 || m.WaitTimeout < 0 {
+			return nil, fmt.Errorf("invalid model configuration at index %d", i)
+		}
+		for _, ep := range m.Endpoints {
+			if ep.MaxInFlight < 0 {
+				return nil, fmt.Errorf("invalid max_in_flight for endpoint %s", ep.ID)
+			}
+		}
+		if m.MaxContextTokens > 0 && m.MaxOutputTokens > m.MaxContextTokens {
+			return nil, fmt.Errorf("model %s output limit exceeds context limit", m.Name)
+		}
+		if m.Discovery == model.DiscoveryDNS && (m.DNSName == "" || m.DNSPort < 0 || m.DNSPort > 65535 || (m.DNSScheme != "" && m.DNSScheme != "http" && m.DNSScheme != "https")) {
+			return nil, fmt.Errorf("invalid DNS discovery for model %s", m.Name)
+		}
 		if m.Version == "" {
 			m.Version = "default"
 		}

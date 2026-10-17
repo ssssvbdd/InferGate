@@ -3,6 +3,7 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -63,8 +64,17 @@ func newDNSDiscoverer(ttl time.Duration) *dnsDiscoverer {
 
 func (d *dnsDiscoverer) Discover(ctx context.Context, mc *model.ModelConfig) ([]model.Endpoint, error) {
 	name := mc.DNSName
+	port := mc.DNSPort
+	if port == 0 {
+		port = 443
+	}
+	scheme := mc.DNSScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	cacheKey := fmt.Sprintf("%s|%d|%s|%t", name, port, scheme, mc.DNSAllowInternal)
 	d.mu.Lock()
-	if e, ok := d.cache[name]; ok && time.Now().Before(e.expireAt) {
+	if e, ok := d.cache[cacheKey]; ok && time.Now().Before(e.expireAt) {
 		d.mu.Unlock()
 		return e.endpoints, nil
 	}
@@ -74,22 +84,24 @@ func (d *dnsDiscoverer) Discover(ctx context.Context, mc *model.ModelConfig) ([]
 	if err != nil {
 		return nil, err
 	}
-	scheme := "https"
-	port := 443
 	eps := make([]model.Endpoint, 0, len(ips))
-	for i, ip := range ips {
+	for _, ip := range ips {
+		metadata := map[string]string{}
+		if mc.DNSAllowInternal {
+			metadata["allow_internal"] = "true"
+		}
 		eps = append(eps, model.Endpoint{
-			ID:      name + "-" + ip.IP.String(),
-			Host:    ip.IP.String(),
-			Port:    port,
-			Scheme:  scheme,
-			Weight:  1,
-			Healthy: true,
+			ID:       name + "-" + ip.IP.String(),
+			Host:     ip.IP.String(),
+			Port:     port,
+			Scheme:   scheme,
+			Weight:   1,
+			Healthy:  true,
+			Metadata: metadata,
 		})
-		_ = i
 	}
 	d.mu.Lock()
-	d.cache[name] = dnsCacheEntry{endpoints: eps, expireAt: time.Now().Add(d.ttl)}
+	d.cache[cacheKey] = dnsCacheEntry{endpoints: eps, expireAt: time.Now().Add(d.ttl)}
 	d.mu.Unlock()
 	return eps, nil
 }

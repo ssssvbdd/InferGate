@@ -3,6 +3,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,6 +16,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 var tenantPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,48}$`)
@@ -58,6 +61,35 @@ type Manager struct {
 	active      map[string]int
 	totalActive int
 	now         func() time.Time
+	quota       *RedisQuota
+}
+
+// UseRedisQuota switches request admission to a shared, fail-closed quota.
+// All gateway replicas must use the same Redis and namespace.
+func (m *Manager) UseRedisQuota(client *redis.Client, namespace string, leaseTTL time.Duration) error {
+	quota, err := NewRedisQuota(client, namespace, leaseTTL)
+	if err != nil {
+		return err
+	}
+	m.quota = quota
+	return nil
+}
+
+// AcquireRequest returns a release handle. The handle renews its Redis lease
+// while the request is active and cancels requestCtx if the lease is lost.
+func (m *Manager) AcquireRequest(ctx context.Context, identity *Identity) (*Lease, time.Duration, error) {
+	if identity == nil || identity.key == nil {
+		return nil, 0, ErrUnauthorized
+	}
+	if m.quota != nil {
+		return m.quota.Acquire(ctx, identity, m.maxInFlight)
+	}
+	retry, err := m.Acquire(identity)
+	if err != nil {
+		return nil, retry, err
+	}
+	requestCtx, cancel := context.WithCancel(ctx)
+	return &Lease{Context: requestCtx, close: func() { m.Release(identity); cancel() }}, 0, nil
 }
 
 func Load(keysPath, saltPath string, maxInFlight int) (*Manager, error) {
@@ -84,6 +116,7 @@ func Load(keysPath, saltPath string, maxInFlight int) (*Manager, error) {
 		return nil, errors.New("auth max_in_flight must be positive")
 	}
 	seen := make(map[string]struct{}, len(file.Keys))
+	tenantLimits := make(map[string][2]int)
 	for i := range file.Keys {
 		key := &file.Keys[i]
 		if !tenantPattern.MatchString(key.Tenant) || key.RPM < 1 || key.Concurrency < 1 {
@@ -97,6 +130,11 @@ func Load(keysPath, saltPath string, maxInFlight int) (*Manager, error) {
 			return nil, errors.New("duplicate auth key hash")
 		}
 		seen[key.SHA256] = struct{}{}
+		limits := [2]int{key.RPM, key.Concurrency}
+		if previous, found := tenantLimits[key.Tenant]; found && previous != limits {
+			return nil, fmt.Errorf("inconsistent quota for tenant %q", key.Tenant)
+		}
+		tenantLimits[key.Tenant] = limits
 		copy(key.digest[:], decoded)
 	}
 	if len(file.Keys) == 0 {

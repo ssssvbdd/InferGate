@@ -23,9 +23,27 @@ make build
 ./bin/infergate -conf config/gateway.yaml -models config/models.yaml
 ```
 
-将 `create_key.py` 输出的条目写入 `config/keys.json`，并按实际模型服务修改 `config/models.yaml`。默认监听 `127.0.0.1:8080`，指标监听 `127.0.0.1:6060`。
+将 `create_key.py` 输出的条目写入 `config/keys.json`，并按实际模型服务修改 `config/models.yaml`。示例配置中的 InferGate 监听 `127.0.0.1:8082`，指标监听 `127.0.0.1:6062`，vLLM 上游为 `127.0.0.1:8001`；使用前核对当前服务器的实际端口。
 
 业务接口包括 `/v1/models`、`/v1/chat/completions` 和 `/v1/embeddings`；健康检查为 `/healthz` 与 `/readyz`。
+
+模型交付脚本位于 `scripts/model_delivery.py` 和 `scripts/accept_model.py`；
+性能工具位于 `tools/perf-lab`，容量报告位于 `scripts/capacity_report.py`。
+运行前将 `config/model-deliveries/qwen3-4b.json` 中的模型目录、服务地址
+和资源参数改为实际环境配置。运行数据、实验报告和密钥保存在仓库之外。
+
+## 双副本流量治理
+
+入口配置见 `deploy/envoy/envoy.yaml`，双网关与双上游配置示例见
+`config/gateway-ha.example.yaml`、`config/models-multi.example.yaml`。
+两个网关进程应使用不同的监听地址、指标端口和本地用量日志，使用同一 Redis、
+`quota_namespace` 和租户密钥。模型与实例的 `max_in_flight` 是每个网关副本
+的本地保护；`auth.max_in_flight` 在 `auth.distributed: true` 时是跨副本
+共享上限。SSE 使用独立的 `stream_idle_timeout`，不受普通请求总超时约束。
+
+`make test-resilience` 检查路由与故障处理；
+`make test-multireplica` 需要隔离的 Redis，用于检查共享配额与集中用量。
+示例端口和 SLO 门槛应根据目标环境调整。
 
 ## 许可证
 

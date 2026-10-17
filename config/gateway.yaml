@@ -1,7 +1,10 @@
 server:
-  addr: "127.0.0.1:8080"
+  addr: "127.0.0.1:8082"
   read_timeout: 30s
+  read_header_timeout: 5s
   write_timeout: 0s
+  idle_timeout: 90s
+  max_header_bytes: 32768
   shutdown_timeout: 15s
   upstream_timeout: 120s
 
@@ -24,7 +27,7 @@ tracing:
 
 metrics:
   enabled: true
-  addr: "127.0.0.1:6060"
+  addr: "127.0.0.1:6062"
   path: /metrics
 
 registry:
@@ -43,10 +46,14 @@ auth:
   keys_file: config/keys.json
   cache_salt_secret_file: config/cache-salt.key
   max_in_flight: 8
+  distributed: false
+  quota_namespace: infergate
+  lease_ttl: 2m
 
 usage:
   ledger_file: run/usage.jsonl
+  redis_stream: ""
 
 readiness:
-  url: http://127.0.0.1:8000/health
+  url: http://127.0.0.1:8001/health
   timeout: 2s

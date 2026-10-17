@@ -14,9 +14,10 @@ import (
 // openAICompatAdapter 适配所有 OpenAI 兼容协议的提供商
 // （OpenAI 官方、vLLM/TGI/LocalAI 等开源推理服务、Ollama 的 OpenAI 端点）。
 type openAICompatAdapter struct {
-	inst   Instance
-	cli    *http.Client
-	apiKey string
+	inst      Instance
+	cli       *http.Client
+	streamCli *http.Client
+	apiKey    string
 	// allowInternal 表示是否允许连接内网（仅用于自建/本地推理）。
 	allowInternal bool
 }
@@ -31,6 +32,7 @@ func (a *openAICompatAdapter) Create(ctx context.Context, inst Instance) error {
 		metaBool(inst.Endpoint.Metadata, "allow_internal")
 	timeout := inst.Model.Timeout
 	a.cli = httpClient(timeout, a.allowInternal)
+	a.streamCli = streamHTTPClient(a.allowInternal)
 	return nil
 }
 
@@ -87,7 +89,7 @@ func (a *openAICompatAdapter) Invoke(ctx context.Context, body []byte) (int, []b
 }
 
 func (a *openAICompatAdapter) InvokeStream(ctx context.Context, body []byte, out chan<- rawChunk) error {
-	return doStream(ctx, a.cli, a.endpointURL(), a.headers(), body, out)
+	return doStream(ctx, a.streamCli, a.endpointURL(), a.headers(), body, out, true, a.inst.Model.StreamIdleTimeout)
 }
 
 func (a *openAICompatAdapter) AdapterError(statusCode int, body []byte) error {

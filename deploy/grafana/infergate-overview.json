@@ -1,0 +1,26 @@
+{
+  "uid": "infergate-overview",
+  "title": "InferGate inference service",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "tags": ["infergate", "vllm"],
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "API requests per second", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}, "targets": [{"expr": "sum by (status_class) (rate(infergate_http_requests_total{route=~\"/v1/.*\"}[5m]))", "legendFormat": "{{status_class}}"}]},
+    {"id": 2, "type": "timeseries", "title": "End to end P50 / P95 / P99 (s)", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}, "targets": [
+      {"expr": "histogram_quantile(0.50, sum by (le) (rate(infergate_http_duration_seconds_bucket{route=\"/v1/chat/completions\"}[5m])))", "legendFormat": "P50"},
+      {"expr": "histogram_quantile(0.95, sum by (le) (rate(infergate_http_duration_seconds_bucket{route=\"/v1/chat/completions\"}[5m])))", "legendFormat": "P95"},
+      {"expr": "histogram_quantile(0.99, sum by (le) (rate(infergate_http_duration_seconds_bucket{route=\"/v1/chat/completions\"}[5m])))", "legendFormat": "P99"}]},
+    {"id": 3, "type": "timeseries", "title": "Metered output tokens per second", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}, "targets": [{"expr": "sum by (model) (rate(infergate_completion_tokens_total[5m]))", "legendFormat": "{{model}}"}]},
+    {"id": 4, "type": "timeseries", "title": "Concurrency and vLLM waiting", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}, "targets": [
+      {"expr": "sum(infergate_concurrency)", "legendFormat": "gateway in flight"},
+      {"expr": "gateway_optimizer_observed_waiting_requests", "legendFormat": "vLLM waiting"}]},
+    {"id": 5, "type": "timeseries", "title": "KV cache and preemptions", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}, "targets": [
+      {"expr": "gateway_optimizer_observed_kv_cache_usage", "legendFormat": "KV used fraction"},
+      {"expr": "increase(gateway_optimizer_observed_vllm_preemptions_total[5m])", "legendFormat": "preemptions / 5m"}]},
+    {"id": 6, "type": "timeseries", "title": "Admission and usage backlog", "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8}, "targets": [
+      {"expr": "sum by (reason) (rate(infergate_admission_failures_total[5m]))", "legendFormat": "reject {{reason}}"},
+      {"expr": "infergate_usage_pending_bytes / 1048576", "legendFormat": "usage pending MiB"}]}
+  ]
+}

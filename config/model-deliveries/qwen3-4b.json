@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "status": "draft",
+  "model": {
+    "name": "qwen3-4b",
+    "version": "default",
+    "kind": "llm",
+    "upstream_name": "qwen3-4b"
+  },
+  "artifact": {
+    "path": "/path/to/Qwen3-4B",
+    "lock_file": "config/model-deliveries/qwen3-4b.lock.json"
+  },
+  "runtime": {
+    "name": "vllm",
+    "version": null,
+    "image": null,
+    "image_digest": null
+  },
+  "resources": {
+    "device": "gpu",
+    "gpu_count": 1,
+    "cpu_cores": null,
+    "memory_gib": null
+  },
+  "processing": {
+    "preprocessor_version": null,
+    "postprocessor_version": null
+  },
+  "service": {
+    "gateway_url": "http://127.0.0.1:8082",
+    "upstream_url": "http://127.0.0.1:8001",
+    "health_path": "/health",
+    "models_path": "/v1/models",
+    "inference_path": "/v1/chat/completions",
+    "protocol": "openai-chat",
+    "streaming": true
+  },
+  "acceptance": {
+    "prompt": "请用一句中文说明推理服务的用途。",
+    "max_tokens": 32,
+    "timeout_seconds": 120,
+    "request_options": {"chat_template_kwargs": {"enable_thinking": false}}
+  }
+}

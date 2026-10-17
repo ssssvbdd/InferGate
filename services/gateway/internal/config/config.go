@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/viper"
@@ -23,26 +25,34 @@ type Config struct {
 }
 
 type AuthConfig struct {
-	KeysFile            string `mapstructure:"keys_file"`
-	CacheSaltSecretFile string `mapstructure:"cache_salt_secret_file"`
-	MaxInFlight         int    `mapstructure:"max_in_flight"`
+	KeysFile            string        `mapstructure:"keys_file"`
+	CacheSaltSecretFile string        `mapstructure:"cache_salt_secret_file"`
+	MaxInFlight         int           `mapstructure:"max_in_flight"`
+	Distributed         bool          `mapstructure:"distributed"`
+	QuotaNamespace      string        `mapstructure:"quota_namespace"`
+	LeaseTTL            time.Duration `mapstructure:"lease_ttl"`
 }
 
 type UsageConfig struct {
-	LedgerFile string `mapstructure:"ledger_file"`
+	LedgerFile  string `mapstructure:"ledger_file"`
+	RedisStream string `mapstructure:"redis_stream"`
 }
 
 type ReadinessConfig struct {
 	URL     string        `mapstructure:"url"`
+	URLs    []string      `mapstructure:"urls"`
 	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 // ServerConfig 是 HTTP 接入层配置。
 type ServerConfig struct {
-	Addr            string        `mapstructure:"addr"`
-	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
-	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	Addr              string        `mapstructure:"addr"`
+	ReadTimeout       time.Duration `mapstructure:"read_timeout"`
+	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
+	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
+	MaxHeaderBytes    int           `mapstructure:"max_header_bytes"`
+	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
 	// UpstreamTimeout 是转发到上游模型的默认超时。
 	UpstreamTimeout time.Duration `mapstructure:"upstream_timeout"`
 }
@@ -56,14 +66,18 @@ type AdminConfig struct {
 
 // RedisConfig 是 Redis 连接配置。
 type RedisConfig struct {
-	Enabled      bool          `mapstructure:"enabled"`
-	Addr         string        `mapstructure:"addr"`
-	Password     string        `mapstructure:"password"`
-	DB           int           `mapstructure:"db"`
-	PoolSize     int           `mapstructure:"pool_size"`
-	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	Enabled       bool          `mapstructure:"enabled"`
+	Addr          string        `mapstructure:"addr"`
+	Password      string        `mapstructure:"password"`
+	PasswordFile  string        `mapstructure:"password_file"`
+	TLSEnabled    bool          `mapstructure:"tls_enabled"`
+	TLSCAFile     string        `mapstructure:"tls_ca_file"`
+	TLSServerName string        `mapstructure:"tls_server_name"`
+	DB            int           `mapstructure:"db"`
+	PoolSize      int           `mapstructure:"pool_size"`
+	DialTimeout   time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout   time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout  time.Duration `mapstructure:"write_timeout"`
 }
 
 // LogConfig 是日志配置。
@@ -127,6 +141,16 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	if cfg.Redis.PasswordFile != "" {
+		if cfg.Redis.Password != "" {
+			return nil, fmt.Errorf("redis.password and password_file are mutually exclusive")
+		}
+		secret, err := os.ReadFile(cfg.Redis.PasswordFile)
+		if err != nil {
+			return nil, fmt.Errorf("read redis password file: %w", err)
+		}
+		cfg.Redis.Password = string(bytes.TrimSpace(secret))
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -137,7 +161,10 @@ func Load(path string) (*Config, error) {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.addr", ":8080")
 	v.SetDefault("server.read_timeout", "30s")
+	v.SetDefault("server.read_header_timeout", "5s")
 	v.SetDefault("server.write_timeout", "0s")
+	v.SetDefault("server.idle_timeout", "90s")
+	v.SetDefault("server.max_header_bytes", 32768)
 	v.SetDefault("server.shutdown_timeout", "15s")
 	v.SetDefault("server.upstream_timeout", "3s")
 
@@ -173,6 +200,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("limiter.default_period", "1s")
 
 	v.SetDefault("auth.max_in_flight", 64)
+	v.SetDefault("auth.distributed", false)
+	v.SetDefault("auth.quota_namespace", "infergate")
+	v.SetDefault("auth.lease_ttl", "2m")
 	v.SetDefault("usage.ledger_file", "run/usage.jsonl")
 	v.SetDefault("readiness.timeout", "2s")
 }
@@ -180,6 +210,9 @@ func setDefaults(v *viper.Viper) {
 func (c *Config) validate() error {
 	if c.Server.Addr == "" {
 		return fmt.Errorf("server.addr must not be empty")
+	}
+	if c.Server.ReadHeaderTimeout <= 0 || c.Server.IdleTimeout <= 0 || c.Server.MaxHeaderBytes < 1024 {
+		return fmt.Errorf("invalid HTTP header or idle limits")
 	}
 	if c.Admin.Enabled && c.Admin.SecretKey == "" {
 		return fmt.Errorf("admin.secret_key must be set when admin is enabled")
@@ -193,11 +226,23 @@ func (c *Config) validate() error {
 	if c.Auth.MaxInFlight < 1 {
 		return fmt.Errorf("auth.max_in_flight must be positive")
 	}
+	if c.Redis.Enabled && c.Redis.Addr == "" {
+		return fmt.Errorf("redis.addr must be set when redis is enabled")
+	}
+	if !c.Redis.TLSEnabled && (c.Redis.TLSCAFile != "" || c.Redis.TLSServerName != "") {
+		return fmt.Errorf("redis.tls_enabled is required when TLS options are set")
+	}
 	if c.Usage.LedgerFile == "" {
 		return fmt.Errorf("usage.ledger_file must be set")
 	}
-	if c.Readiness.URL == "" {
-		return fmt.Errorf("readiness.url must be set")
+	if (c.Auth.Distributed || c.Usage.RedisStream != "") && !c.Redis.Enabled {
+		return fmt.Errorf("redis.enabled must be true for distributed quotas or centralized usage")
+	}
+	if c.Auth.Distributed && (c.Auth.QuotaNamespace == "" || c.Auth.LeaseTTL < 15*time.Second || c.Auth.LeaseTTL > 30*time.Minute) {
+		return fmt.Errorf("invalid distributed quota namespace or lease_ttl")
+	}
+	if c.Readiness.URL == "" && len(c.Readiness.URLs) == 0 {
+		return fmt.Errorf("readiness.url or readiness.urls must be set")
 	}
 	return nil
 }

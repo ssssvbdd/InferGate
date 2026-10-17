@@ -111,7 +111,7 @@ func (a *anthropicAdapter) Invoke(ctx context.Context, body []byte) (int, []byte
 }
 
 func (a *anthropicAdapter) InvokeStream(ctx context.Context, body []byte, out chan<- rawChunk) error {
-	return doStream(ctx, a.cli, a.baseURL()+"/v1/messages", a.headers(), body, out)
+	return doStream(ctx, streamHTTPClient(false), a.baseURL()+"/v1/messages", a.headers(), body, out, false, a.inst.Model.StreamIdleTimeout)
 }
 
 func (a *anthropicAdapter) AdapterError(statusCode int, body []byte) error {

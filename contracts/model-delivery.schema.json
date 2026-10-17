@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ssssvbdd/InferGate/main/contracts/model-delivery.schema.json",
+  "title": "Model delivery contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "model", "artifact", "runtime", "resources", "processing", "service", "acceptance"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"enum": ["draft", "release_candidate"]},
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "kind", "upstream_name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["llm", "embedding", "rerank"]},
+        "upstream_name": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "lock_file"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "lock_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "image", "image_digest"],
+      "properties": {
+        "name": {"enum": ["vllm", "triton", "onnxruntime", "pytorch"]},
+        "version": {"type": ["string", "null"]},
+        "image": {"type": ["string", "null"]},
+        "image_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}
+      }
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false,
+      "required": ["device", "gpu_count", "cpu_cores", "memory_gib"],
+      "properties": {
+        "device": {"enum": ["cpu", "gpu"]},
+        "gpu_count": {"type": "integer", "minimum": 0},
+        "cpu_cores": {"type": ["integer", "null"], "minimum": 1},
+        "memory_gib": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      }
+    },
+    "processing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["preprocessor_version", "postprocessor_version"],
+      "properties": {
+        "preprocessor_version": {"type": ["string", "null"]},
+        "postprocessor_version": {"type": ["string", "null"]}
+      }
+    },
+    "service": {
+      "type": "object", "additionalProperties": false,
+      "required": ["gateway_url", "upstream_url", "health_path", "models_path", "inference_path", "protocol", "streaming"],
+      "properties": {
+        "gateway_url": {"type": "string", "pattern": "^https?://"},
+        "upstream_url": {"type": "string", "pattern": "^https?://"},
+        "health_path": {"type": "string", "pattern": "^/"},
+        "models_path": {"type": "string", "pattern": "^/"},
+        "inference_path": {"type": "string", "pattern": "^/"},
+        "protocol": {"enum": ["openai-chat", "openai-embeddings", "triton-http", "grpc"]},
+        "streaming": {"type": "boolean"}
+      }
+    },
+    "acceptance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prompt", "max_tokens", "timeout_seconds", "request_options"],
+      "properties": {
+        "prompt": {"type": "string", "minLength": 1},
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 256},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "request_options": {"type": "object"}
+      }
+    }
+  }
+}

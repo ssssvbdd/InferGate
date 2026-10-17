@@ -2,6 +2,7 @@
 package breaker
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ type instanceState struct {
 	firstFailAt time.Time
 	openedAt    time.Time
 	lastAccess  time.Time
+	probeActive bool
 }
 
 // CircuitBreaker 管理各实例的熔断状态。
@@ -78,7 +80,8 @@ func New(cfg Config) *CircuitBreaker {
 	return cb
 }
 
-// IsHealthy 判断实例当前是否可用（Open 态不可用；HalfOpen/Closed 可用）。
+// IsHealthy reports whether an endpoint is eligible for selection. It does not
+// reserve the half-open probe; only the endpoint actually selected may do so.
 func (cb *CircuitBreaker) IsHealthy(key string) bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -91,9 +94,33 @@ func (cb *CircuitBreaker) IsHealthy(key string) bool {
 		// 到达恢复间隔则进入半开探测。
 		if time.Since(st.openedAt) >= cb.cfg.RecoveryInterval {
 			st.state = StateHalfOpen
+			st.probeActive = false
 			return true
 		}
 		return false
+	}
+	return st.state == StateClosed || !st.probeActive
+}
+
+// TryAcquire atomically reserves the only half-open probe. A competing request
+// must choose another endpoint or fail fast.
+func (cb *CircuitBreaker) TryAcquire(key string) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	st := cb.get(key)
+	now := time.Now()
+	st.lastAccess = now
+	if st.state == StateOpen {
+		if now.Sub(st.openedAt) < cb.cfg.RecoveryInterval {
+			return false
+		}
+		st.state = StateHalfOpen
+	}
+	if st.state == StateHalfOpen {
+		if st.probeActive {
+			return false
+		}
+		st.probeActive = true
 	}
 	return true
 }
@@ -116,6 +143,16 @@ func (cb *CircuitBreaker) Record(key string, err error) {
 	}
 	if shouldTrigger(err) {
 		cb.RecordFailure(key)
+		return
+	}
+	// A cancelled or rejected probe gives no evidence that the endpoint has
+	// recovered. Return to open and wait before another probe.
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if st, ok := cb.items[key]; ok && st.state == StateHalfOpen {
+		st.state = StateOpen
+		st.probeActive = false
+		st.openedAt = time.Now()
 	}
 }
 
@@ -128,6 +165,7 @@ func (cb *CircuitBreaker) RecordSuccess(key string) {
 	if st.state == StateHalfOpen {
 		st.state = StateClosed
 	}
+	st.probeActive = false
 	st.failCount = 0
 	st.firstFailAt = time.Time{}
 }
@@ -144,6 +182,7 @@ func (cb *CircuitBreaker) RecordFailure(key string) {
 		// 半开探测失败，重新打开。
 		st.state = StateOpen
 		st.openedAt = now
+		st.probeActive = false
 		return
 	}
 
@@ -156,6 +195,7 @@ func (cb *CircuitBreaker) RecordFailure(key string) {
 	if st.failCount >= cb.cfg.MaxFailCount {
 		st.state = StateOpen
 		st.openedAt = now
+		st.probeActive = false
 	}
 }
 
@@ -199,6 +239,9 @@ func (cb *CircuitBreaker) Close() { close(cb.stop) }
 // 触发：5xx、网络错误、连接失败；排除：上下文错误、过载、限流、4xx。
 func shouldTrigger(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var ge *gwerr.GatewayError

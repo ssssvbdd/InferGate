@@ -1,0 +1,1 @@
+{"event_id":"event-a","timestamp":"2026-10-16T10:00:00Z","tenant":"team-a","model":"qwen3-4b","status":200,"duration_ms":100,"metered":true,"prompt_tokens":100,"completion_tokens":60}

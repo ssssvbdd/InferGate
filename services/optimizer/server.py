@@ -56,8 +56,8 @@ class App:
         if not policy_path:
             raise ValueError("OPTIMIZER_POLICY_FILE is required")
         self.controller = OptimizationController(OptimizationPolicy.from_path(policy_path))
-        self.vllm_metrics_url = os.environ.get("VLLM_METRICS_URL", "http://127.0.0.1:8000/metrics")
-        self.gateway_metrics_url = os.environ.get("GATEWAY_METRICS_URL", "http://127.0.0.1:6060/metrics")
+        self.vllm_metrics_url = os.environ.get("VLLM_METRICS_URL", "http://127.0.0.1:8001/metrics")
+        self.gateway_metrics_url = os.environ.get("GATEWAY_METRICS_URL", "http://127.0.0.1:6062/metrics")
         for name, value in (("VLLM_METRICS_URL", self.vllm_metrics_url),
                             ("GATEWAY_METRICS_URL", self.gateway_metrics_url)):
             parsed = urlsplit(value)

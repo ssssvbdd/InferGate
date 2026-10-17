@@ -24,13 +24,14 @@ const (
 
 // Endpoint 是一个上游实例。
 type Endpoint struct {
-	ID       string            `json:"id" yaml:"id"`
-	Host     string            `json:"host" yaml:"host"`
-	Port     int               `json:"port" yaml:"port"`
-	Scheme   string            `json:"scheme" yaml:"scheme"` // http / https
-	Weight   int               `json:"weight" yaml:"weight"`
-	Healthy  bool              `json:"healthy" yaml:"-"`
-	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata"`
+	ID          string            `json:"id" yaml:"id"`
+	Host        string            `json:"host" yaml:"host"`
+	Port        int               `json:"port" yaml:"port"`
+	Scheme      string            `json:"scheme" yaml:"scheme"` // http / https
+	Weight      int               `json:"weight" yaml:"weight"`
+	MaxInFlight int               `json:"max_in_flight,omitempty" yaml:"max_in_flight"`
+	Healthy     bool              `json:"healthy" yaml:"-"`
+	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata"`
 }
 
 // Credential 是访问上游的凭证。
@@ -72,7 +73,11 @@ type ModelConfig struct {
 	LoadBalance LoadBalanceStrategy `json:"load_balance" yaml:"load_balance"`
 	Endpoints   []Endpoint          `json:"endpoints,omitempty" yaml:"endpoints"`
 	// DNSName 用于 DNS 发现。
-	DNSName string `json:"dns_name,omitempty" yaml:"dns_name"`
+	DNSName   string `json:"dns_name,omitempty" yaml:"dns_name"`
+	DNSPort   int    `json:"dns_port,omitempty" yaml:"dns_port"`
+	DNSScheme string `json:"dns_scheme,omitempty" yaml:"dns_scheme"`
+	// DNSAllowInternal must be explicit for private inference-service addresses.
+	DNSAllowInternal bool `json:"dns_allow_internal,omitempty" yaml:"dns_allow_internal"`
 
 	// Priority 用于条件路由排序（越大越优先）。
 	Priority int `json:"priority" yaml:"priority"`
@@ -89,7 +94,18 @@ type ModelConfig struct {
 
 	// Timeout 覆盖默认上游超时。
 	Timeout time.Duration `json:"timeout,omitempty" yaml:"timeout"`
+	// StreamIdleTimeout limits silence between SSE lines without capping total duration.
+	StreamIdleTimeout time.Duration `json:"stream_idle_timeout,omitempty" yaml:"stream_idle_timeout"`
 
 	// MaxRetries 覆盖默认重试次数。
 	MaxRetries int `json:"max_retries,omitempty" yaml:"max_retries"`
+	// Local admission limits are per gateway replica; auth.max_in_flight is shared
+	// across replicas when distributed quotas are enabled.
+	MaxInFlight int           `json:"max_in_flight,omitempty" yaml:"max_in_flight"`
+	MaxWaiting  int           `json:"max_waiting,omitempty" yaml:"max_waiting"`
+	WaitTimeout time.Duration `json:"wait_timeout,omitempty" yaml:"wait_timeout"`
+	// MaxContextTokens is an admission guard based on an approximate prompt size.
+	// The inference runtime remains responsible for exact tokenizer validation.
+	MaxContextTokens int `json:"max_context_tokens,omitempty" yaml:"max_context_tokens"`
+	MaxOutputTokens  int `json:"max_output_tokens,omitempty" yaml:"max_output_tokens"`
 }

@@ -24,7 +24,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+
+from resource_sampler import ResourceSampler
 
 
 MODES = ("baseline", "prefix", "lmcache")
@@ -118,15 +121,19 @@ def port_is_free(host: str, port: int) -> bool:
             return False
 
 
-def http_json(url: str, payload: dict | None = None, timeout: int = 30) -> dict:
+def http_json(url: str, payload: dict | None = None, timeout: int = 30,
+              api_key: str | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = Request(url, data=data, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = Request(url, data=data, headers=headers)
     with urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
-def available_model(url: str) -> str:
-    data = http_json(url.rstrip("/") + "/v1/models")
+def available_model(url: str, api_key: str | None = None) -> str:
+    data = http_json(url.rstrip("/") + "/v1/models", api_key=api_key)
     models = data.get("data") or []
     if not models or not models[0].get("id"):
         raise RuntimeError("/v1/models returned no model id")
@@ -164,17 +171,21 @@ def make_workload(seed: int, prefixes: int, suffixes: int,
     return cold, eviction, warm
 
 
-def send_stream(url: str, model: str, item: dict, max_tokens: int, timeout: int) -> dict:
+def send_stream(url: str, model: str, item: dict, max_tokens: int, timeout: int,
+                api_key: str | None = None) -> dict:
     endpoint = url.rstrip("/") + "/v1/chat/completions"
     payload = {"model": model, "messages": [{"role": "user", "content": item["prompt"]}],
-               "max_tokens": max_tokens, "temperature": 0, "stream": True,
+               "max_tokens": item.get("max_tokens", max_tokens), "temperature": 0, "stream": True,
                "stream_options": {"include_usage": True}}
-    req = Request(endpoint, data=json.dumps(payload).encode("utf-8"),
-                  headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
     start = time.perf_counter()
     first_content = None
     usage = {}
     pieces = []
+    seen_done = False
     try:
         with urlopen(req, timeout=timeout) as response:
             for raw in response:
@@ -183,6 +194,7 @@ def send_stream(url: str, model: str, item: dict, max_tokens: int, timeout: int)
                     continue
                 value = line[5:].strip()
                 if value == "[DONE]":
+                    seen_done = True
                     break
                 event = json.loads(value)
                 if event.get("error"):
@@ -195,6 +207,8 @@ def send_stream(url: str, model: str, item: dict, max_tokens: int, timeout: int)
                             first_content = time.perf_counter()
                         pieces.append(content)
         end = time.perf_counter()
+        if not seen_done:
+            raise RuntimeError("SSE stream ended without [DONE]")
         if first_content is None:
             raise RuntimeError("No streamed content received")
         output_tokens = usage.get("completion_tokens")
@@ -206,19 +220,33 @@ def send_stream(url: str, model: str, item: dict, max_tokens: int, timeout: int)
                 "tpot_s": ((end - first_content) / (output_tokens - 1)
                            if isinstance(output_tokens, int) and output_tokens > 1 else None)}
     except Exception as exc:
-        return {"id": item["id"], "ok": False, "error": str(exc),
+        # Upstream error text may echo user input; retain only a bounded class/status.
+        status = exc.code if isinstance(exc, HTTPError) else None
+        return {"id": item["id"], "ok": False, "error_type": type(exc).__name__,
+                "http_status": status,
                 "latency_s": time.perf_counter() - start}
 
 
 def phase(url: str, model: str, items: list[dict], max_tokens: int,
-          timeout: int, concurrency: int) -> tuple[list[dict], float]:
+          timeout: int, concurrency: int, api_key: str | None = None) -> tuple[list[dict], float]:
     started = time.perf_counter()
     if concurrency == 1:
-        rows = [send_stream(url, model, item, max_tokens, timeout) for item in items]
+        rows = [send_stream(url, model, item, max_tokens, timeout, api_key) for item in items]
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            rows = list(pool.map(lambda item: send_stream(url, model, item, max_tokens, timeout), items))
+            rows = list(pool.map(lambda item: send_stream(url, model, item, max_tokens, timeout, api_key), items))
     return rows, time.perf_counter() - started
+
+
+def read_api_key(path: str | None, url: str) -> str | None:
+    if not path:
+        return None
+    if urlsplit(url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("API key benchmarks require a loopback URL")
+    key = Path(path).read_text(encoding="utf-8").strip()
+    if not key or len(key) > 4096:
+        raise ValueError("API key file is empty or too large")
+    return key
 
 
 def percentile(values: list[float], percent: int) -> float | None:
@@ -241,9 +269,15 @@ def summarize(rows: list[dict], duration_s: float | None = None) -> dict:
             "duration_s": duration_s,
             "ttft_mean_s": statistics.mean(ttfts) if ttfts else None,
             "ttft_p50_s": percentile(ttfts, 50), "ttft_p95_s": percentile(ttfts, 95),
+            "ttft_p99_s": percentile(ttfts, 99),
+            "latency_p50_s": percentile(latencies, 50),
             "latency_p95_s": percentile(latencies, 95),
+            "latency_p99_s": percentile(latencies, 99),
             "tpot_mean_s": statistics.mean(tpots) if tpots else None,
+            "tpot_p50_s": percentile(tpots, 50), "tpot_p95_s": percentile(tpots, 95),
+            "tpot_p99_s": percentile(tpots, 99),
             "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "requests_per_s": len(good) / duration_s if duration_s else None,
             "input_tokens_per_s": input_tokens / duration_s if duration_s else None,
             "output_tokens_per_s": output_tokens / duration_s if duration_s else None}
 
@@ -384,7 +418,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise ValueError("concurrency must be 1..4 on a shared server")
     if args.max_tokens < 1 or args.timeout < 1:
         raise ValueError("max-tokens and timeout must be positive")
-    model = available_model(args.url)
+    api_key = read_api_key(args.api_key_file, args.url)
+    model = available_model(args.url, api_key)
     meta_path = Path(args.server_meta)
     server_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
     if server_meta is None and not args.allow_unmanaged:
@@ -414,17 +449,23 @@ def cmd_run(args: argparse.Namespace) -> None:
     results = {}
     summaries = {}
     metrics_by_phase = {}
-    for name, items in (("cold", cold), ("eviction", eviction), ("warm", warm)):
-        before_phase = metrics_lines(args.url)
-        rows, duration_s = phase(args.url, model, items, args.max_tokens, args.timeout, args.concurrency)
-        metrics_by_phase[name] = {"before": before_phase, "after": metrics_lines(args.url)}
-        results[name] = rows
-        summary = summarize(rows, duration_s)
-        summaries[name] = summary
-        print(f"{name}: {summary['success']}/{summary['requests']} succeeded; TTFT p50={summary['ttft_p50_s']}")
-        if summary["failed"]:
-            print("A request failed; stopping this run before subsequent phases.", file=sys.stderr)
-            break
+    sampler = ResourceSampler(args.gpu_index, args.resource_interval)
+    sampler.start()
+    try:
+        for name, items in (("cold", cold), ("eviction", eviction), ("warm", warm)):
+            before_phase = metrics_lines(args.url)
+            rows, duration_s = phase(args.url, model, items, args.max_tokens, args.timeout,
+                                     args.concurrency, api_key)
+            metrics_by_phase[name] = {"before": before_phase, "after": metrics_lines(args.url)}
+            results[name] = rows
+            summary = summarize(rows, duration_s)
+            summaries[name] = summary
+            print(f"{name}: {summary['success']}/{summary['requests']} succeeded; TTFT p50={summary['ttft_p50_s']}")
+            if summary["failed"]:
+                print("A request failed; stopping this run before subsequent phases.", file=sys.stderr)
+                break
+    finally:
+        resources = sampler.stop()
     output = {"schema_version": 1, "mode": args.mode, "started_at": started,
               "finished_at": utc_now(), "url": args.url, "model": model,
               "workload": workload, "fingerprint": fingerprint,
@@ -435,6 +476,7 @@ def cmd_run(args: argparse.Namespace) -> None:
               "compute_processes_after": (compute_processes() if args.gpu_index is not None else None),
               "metrics_before": metric_before, "metrics_after": metrics_lines(args.url),
               "metrics_by_phase": metrics_by_phase,
+              "resource_summary": resources,
               "results": results, "summaries": summaries,
               "limitations": ["Shared GPU: another user's workload may change during the run.",
                               "Eviction pressure is not proof that GPU KV blocks were evicted."]}
@@ -442,6 +484,64 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"Saved {args.output}")
     if any(row["ok"] is False for rows in results.values() for row in rows):
         raise RuntimeError("One or more requests failed; see saved result JSON")
+
+
+def load_trace(path: Path, max_items: int) -> list[dict]:
+    if max_items < 1:
+        raise ValueError("max-items must be positive")
+    items = []
+    total_bytes = 0
+    with path.open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if (not isinstance(item, dict) or not isinstance(item.get("prompt"), str)
+                    or not item["prompt"] or len(item["prompt"].encode("utf-8")) > 256 * 1024):
+                raise ValueError(f"invalid prompt at trace line {line_number}")
+            total_bytes += len(item["prompt"].encode("utf-8"))
+            if total_bytes > 32 * 1024 * 1024:
+                raise ValueError("trace exceeds 32 MiB of prompt text")
+            budget = item.get("max_tokens", 128)
+            if type(budget) is not int or not 1 <= budget <= 4096:
+                raise ValueError(f"invalid max_tokens at trace line {line_number}")
+            item_id = hashlib.sha256(str(item.get("id", line_number)).encode("utf-8")).hexdigest()[:16]
+            items.append({"id": item_id, "prompt": item["prompt"],
+                          "max_tokens": budget})
+            if len(items) > max_items:
+                raise ValueError("trace exceeds max-items")
+    if not items:
+        raise ValueError("trace is empty")
+    return items
+
+
+def cmd_trace(args: argparse.Namespace) -> None:
+    if not 1 <= args.concurrency <= 64 or args.timeout < 1:
+        raise ValueError("concurrency must be 1..64 and timeout must be positive")
+    api_key = read_api_key(args.api_key_file, args.url)
+    model = available_model(args.url, api_key)
+    items = load_trace(Path(args.trace), args.max_items)
+    fingerprint = hashlib.sha256(json.dumps({"model": model, "items": items},
+                                            sort_keys=True).encode()).hexdigest()
+    started = utc_now()
+    sampler = ResourceSampler(args.gpu_index, args.resource_interval)
+    sampler.start()
+    try:
+        rows, duration_s = phase(args.url, model, items, 128, args.timeout,
+                                 args.concurrency, api_key)
+    finally:
+        resources = sampler.stop()
+    output = {"schema_version": 1, "kind": "trace-benchmark", "model": model,
+              "trace_sha256": _file_sha256(Path(args.trace)), "fingerprint": fingerprint,
+              "concurrency": args.concurrency, "started_at": started,
+              "summary": summarize(rows, duration_s), "resource_summary": resources,
+              "results": rows,
+              "limitations": ["Trace input may contain sensitive prompts; store it privately.",
+                              "The result includes hashes and timing, never prompt or response text."]}
+    write_json(Path(args.output), output)
+    print(json.dumps(output["summary"], indent=2))
+    if output["summary"]["failed"]:
+        raise RuntimeError("trace requests failed; inspect the result")
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -628,7 +728,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-tokens", type=int, default=32)
     run.add_argument("--concurrency", type=int, default=1)
     run.add_argument("--timeout", type=int, default=180)
+    run.add_argument("--resource-interval", type=float, default=1.0)
+    run.add_argument("--api-key-file", help="Private API key file for a loopback gateway benchmark")
     run.set_defaults(func=cmd_run)
+    trace = sub.add_parser("trace", help="Benchmark a private JSONL prompt trace without recording text")
+    trace.add_argument("--trace", required=True)
+    trace.add_argument("--url", default="http://127.0.0.1:8001")
+    trace.add_argument("--gpu-index", type=int)
+    trace.add_argument("--output", required=True)
+    trace.add_argument("--concurrency", type=int, default=4)
+    trace.add_argument("--timeout", type=int, default=180)
+    trace.add_argument("--max-items", type=int, default=10000)
+    trace.add_argument("--resource-interval", type=float, default=1.0)
+    trace.add_argument("--api-key-file", help="Private API key file for a loopback gateway benchmark")
+    trace.set_defaults(func=cmd_trace)
     report = sub.add_parser("report", help="Compare runs with the same workload fingerprint")
     report.add_argument("inputs", nargs="+", help="One result JSON per mode")
     report.add_argument("--output", default="results/report.md")

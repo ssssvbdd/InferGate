@@ -141,7 +141,10 @@ func (p *ModelProvider) StreamRequest(ctx context.Context, req *model.Request) (
 	go func() {
 		defer close(rawCh)
 		if err := p.adapter.InvokeStream(ctx, body, rawCh); err != nil {
-			rawCh <- rawChunk{err: err}
+			select {
+			case rawCh <- rawChunk{err: err}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 

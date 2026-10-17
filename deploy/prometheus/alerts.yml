@@ -19,3 +19,57 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: InferGate error ratio is above 5 percent
+      - alert: InferGateSLOAvailability
+        expr: sum(rate(infergate_http_requests_total{route=~"/v1/.*",status_class="5xx"}[5m])) / clamp_min(sum(rate(infergate_http_requests_total{route=~"/v1/.*"}[5m])), 0.001) > 0.01
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 1 percent of API requests return 5xx
+      - alert: InferGateP95Latency
+        expr: histogram_quantile(0.95, sum by (le) (rate(infergate_http_duration_seconds_bucket{route="/v1/chat/completions"}[5m]))) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Chat completion p95 end-to-end latency exceeds 10 seconds
+      - alert: InferGateQuotaUnavailable
+        expr: increase(infergate_admission_failures_total{reason="quota_store"}[5m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Shared quota store failed; new requests are rejected
+      - alert: InferGateUsageBacklog
+        expr: infergate_usage_pending_bytes > 10485760
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 10 MiB of usage events await central delivery
+      - alert: InferGateStreamFailures
+        expr: sum(increase(infergate_stream_failures_total{reason="upstream"}[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Streaming responses ended before DONE
+      - alert: InferGateVLLMDown
+        expr: up{job="vllm"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Configured vLLM metrics endpoint is unavailable
+      - alert: InferGateVLLMQueueSustained
+        expr: gateway_optimizer_observed_waiting_requests > 4
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: vLLM has more than four queued requests for five minutes
+      - alert: InferGateKVCachePressure
+        expr: gateway_optimizer_observed_kv_cache_usage > 0.85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: vLLM KV cache use exceeds the review threshold
+      - alert: InferGatePreemptionIncrease
+        expr: increase(gateway_optimizer_observed_vllm_preemptions_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: vLLM preempted at least one request in the past five minutes

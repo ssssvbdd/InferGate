@@ -3,14 +3,18 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"regexp"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ssssvbdd/InferGate/services/gateway/internal/log"
+	"github.com/ssssvbdd/InferGate/services/gateway/internal/metrics"
 	"go.uber.org/zap"
 )
 
@@ -39,7 +43,8 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Error("panic recovered", zap.Any("panic", r), zap.String("path", c.Request.URL.Path))
+				log.Error("panic recovered", zap.String("panic_type", fmt.Sprintf("%T", r)),
+					zap.String("path", c.Request.URL.Path), zap.String("request_id", c.GetString("request_id")))
 				c.AbortWithStatusJSON(500, gin.H{"error": gin.H{"message": "internal error", "type": "internal_error"}})
 			}
 		}()
@@ -51,12 +56,15 @@ func RecoveryMiddleware() gin.HandlerFunc {
 func TracingMiddleware() gin.HandlerFunc {
 	tracer := otel.Tracer("infergate.http")
 	return func(c *gin.Context) {
-		ctx, span := tracer.Start(c.Request.Context(), c.Request.Method+" "+c.FullPath())
+		incoming := otel.GetTextMapPropagator().Extract(c.Request.Context(),
+			propagation.HeaderCarrier(c.Request.Header))
+		ctx, span := tracer.Start(incoming, c.Request.Method+" "+c.FullPath())
 		defer span.End()
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
-		span.SetAttributes()
-		_ = trace.SpanFromContext(ctx)
+		span.SetAttributes(attribute.String("http.request.method", c.Request.Method),
+			attribute.String("http.route", c.FullPath()),
+			attribute.Int("http.response.status_code", c.Writer.Status()))
 	}
 }
 
@@ -64,8 +72,13 @@ func TracingMiddleware() gin.HandlerFunc {
 func AccessLogMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+		c.Set("request_started_at", start)
 		c.Next()
+		metrics.ReportHTTP(c.FullPath(), c.Writer.Status(), time.Since(start))
+		spanContext := trace.SpanFromContext(c.Request.Context()).SpanContext()
 		log.Info("http access",
+			zap.String("request_id", c.GetString("request_id")),
+			zap.String("trace_id", spanContext.TraceID().String()),
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
 			zap.Int("status", c.Writer.Status()),

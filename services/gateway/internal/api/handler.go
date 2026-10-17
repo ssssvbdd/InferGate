@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -72,17 +73,25 @@ func (h *Handler) authenticate() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "invalid API key", "type": "authentication_error"}})
 			return
 		}
-		retryAfter, err := h.auth.Acquire(identity)
+		lease, retryAfter, err := h.auth.AcquireRequest(c.Request.Context(), identity)
 		if err != nil {
 			status := http.StatusTooManyRequests
-			if errors.Is(err, auth.ErrGlobalBusy) {
+			errorType := "rate_limit_error"
+			if errors.Is(err, auth.ErrGlobalBusy) || errors.Is(err, auth.ErrQuotaUnavailable) {
 				status = http.StatusServiceUnavailable
 			}
-			c.Header("Retry-After", strconv.Itoa(max(1, int(retryAfter.Seconds()))))
-			c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": err.Error(), "type": "rate_limit_error"}})
+			if errors.Is(err, auth.ErrQuotaUnavailable) {
+				errorType = "service_unavailable"
+			}
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(max(1, int((retryAfter+time.Second-1)/time.Second))))
+			}
+			metrics.ReportAdmissionFailure(err)
+			c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": err.Error(), "type": errorType}})
 			return
 		}
-		defer h.auth.Release(identity)
+		defer lease.Release()
+		c.Request = c.Request.WithContext(lease.Context)
 		c.Set(identityKey, identity)
 		c.Next()
 	}
@@ -140,6 +149,9 @@ func (h *Handler) embeddings(c *gin.Context) {
 }
 
 func (h *Handler) handleStream(c *gin.Context, req *model.Request, identity *auth.Identity) {
+	streamCtx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	c.Request = c.Request.WithContext(streamCtx)
 	stream, cleanup, err := h.gw.StreamForwardRequest(c.Request.Context(), req)
 	if err != nil {
 		writeError(c, err)
@@ -153,13 +165,19 @@ func (h *Handler) handleStream(c *gin.Context, req *model.Request, identity *aut
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.WriteHeader(http.StatusOK)
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		writeError(c, gwerr.ErrInternal)
-		return
-	}
 	var lastUsage *model.Usage
-	defer func() { h.record(c, req, identity, lastUsage) }()
+	completed := false
+	defer func() {
+		if !completed {
+			reason := "upstream"
+			if c.Request.Context().Err() != nil {
+				reason = "cancelled"
+			}
+			metrics.ReportStreamFailure(reason)
+			c.Set("stream_failed", true)
+		}
+		h.record(c, req, identity, lastUsage)
+	}()
 	for chunk := range stream {
 		if chunk.Usage != nil {
 			lastUsage = chunk.Usage
@@ -167,30 +185,46 @@ func (h *Handler) handleStream(c *gin.Context, req *model.Request, identity *aut
 		if chunk.Err != nil {
 			_, ge := gwerr.HandleError(chunk.Err)
 			payload, _ := json.Marshal(gin.H{"error": errorBody(ge)})
-			_, _ = c.Writer.Write([]byte("data: "))
-			_, _ = c.Writer.Write(payload)
-			_, _ = c.Writer.Write([]byte("\n\n"))
-			flusher.Flush()
+			_ = writeSSE(c, payload)
 			return
 		}
 		if chunk.Done {
-			_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
-			flusher.Flush()
+			completed = writeSSE(c, []byte("[DONE]")) == nil
 			return
 		}
 		if len(chunk.Data) > 0 {
-			_, _ = c.Writer.Write([]byte("data: "))
-			_, _ = c.Writer.Write(chunk.Data)
-			_, _ = c.Writer.Write([]byte("\n\n"))
-			flusher.Flush()
+			if err := writeSSE(c, chunk.Data); err != nil {
+				cancel()
+				return
+			}
 		}
 	}
 }
 
+func writeSSE(c *gin.Context, payload []byte) error {
+	if err := c.Request.Context().Err(); err != nil {
+		return err
+	}
+	frame := make([]byte, 0, len(payload)+8)
+	frame = append(frame, "data: "...)
+	frame = append(frame, payload...)
+	frame = append(frame, '\n', '\n')
+	if _, err := c.Writer.Write(frame); err != nil {
+		return err
+	}
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return c.Request.Context().Err()
+}
+
 func parseRequest(c *gin.Context) (*model.Request, error) {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBody+1))
-	if err != nil || len(body) > maxRequestBody {
-		return nil, gwerr.ErrInvalidRequest.WithCause(errors.New("request body exceeds 10 MiB"))
+	if len(body) > maxRequestBody {
+		return nil, gwerr.New("request_too_large", gwerr.TypeInvalidRequest, http.StatusRequestEntityTooLarge, "request body exceeds 10 MiB")
+	}
+	if err != nil {
+		return nil, gwerr.ErrInvalidRequest.WithCause(err)
 	}
 	req := &model.Request{}
 	if err := json.Unmarshal(body, req); err != nil {
@@ -230,7 +264,18 @@ func (h *Handler) record(c *gin.Context, req *model.Request, identity *auth.Iden
 	}
 	event := usage.Event{Timestamp: time.Now().UTC(), RequestID: c.GetString("request_id"),
 		Tenant: identity.Tenant, Route: c.FullPath(), Model: req.Model,
-		Status: c.Writer.Status(), Stream: req.Stream}
+		Status: c.Writer.Status(), Stream: req.Stream, Outcome: "ok"}
+	if event.Status >= 500 || c.GetBool("stream_failed") {
+		event.Outcome = "error"
+	}
+	if c.Request.Context().Err() != nil {
+		event.Outcome = "cancelled"
+	}
+	if started, ok := c.Get("request_started_at"); ok {
+		if start, ok := started.(time.Time); ok {
+			event.DurationMS = time.Since(start).Milliseconds()
+		}
+	}
 	if tokenUsage != nil {
 		event.PromptTokens = tokenUsage.PromptTokens
 		event.CompletionTokens = tokenUsage.CompletionTokens
@@ -254,6 +299,9 @@ func writeResponse(c *gin.Context, resp *model.Response) {
 
 func writeError(c *gin.Context, err error) {
 	status, ge := gwerr.HandleError(err)
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+		c.Header("Retry-After", "1")
+	}
 	c.JSON(status, gin.H{"error": errorBody(ge)})
 }
 

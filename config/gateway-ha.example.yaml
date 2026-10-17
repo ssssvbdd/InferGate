@@ -1,0 +1,35 @@
+# Copy per replica and give each process a unique server.addr, metrics.addr,
+# and usage.ledger_file. Both replicas must share Redis and quota_namespace.
+server:
+  addr: 127.0.0.1:18082
+  read_timeout: 30s
+  read_header_timeout: 5s
+  write_timeout: 0s
+  idle_timeout: 90s
+  max_header_bytes: 32768
+  shutdown_timeout: 30s
+  upstream_timeout: 120s
+admin: {enabled: false}
+redis:
+  enabled: true
+  addr: 127.0.0.1:6379
+  # password_file: config/redis-password  # Set when Redis requires auth.
+metrics:
+  enabled: true
+  addr: 127.0.0.1:6062
+  path: /metrics
+auth:
+  keys_file: config/keys.json
+  cache_salt_secret_file: config/cache-salt.key
+  max_in_flight: 16
+  distributed: true
+  quota_namespace: infergate-production
+  lease_ttl: 2m
+usage:
+  ledger_file: run/usage-replica-a.jsonl
+  redis_stream: infergate:usage:{production}:events
+readiness:
+  urls:
+    - http://127.0.0.1:18001/health
+    - http://127.0.0.1:18002/health
+  timeout: 2s

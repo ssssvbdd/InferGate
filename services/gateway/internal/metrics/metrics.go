@@ -2,11 +2,13 @@
 package metrics
 
 import (
+	"errors"
 	"time"
 
-	"github.com/ssssvbdd/InferGate/services/gateway/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/ssssvbdd/InferGate/services/gateway/internal/auth"
+	"github.com/ssssvbdd/InferGate/services/gateway/internal/model"
 )
 
 var (
@@ -77,7 +79,56 @@ var (
 	tenantCompletionTokens = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "infergate", Name: "tenant_completion_tokens_total",
 		Help: "Metered completion tokens by authenticated tenant."}, []string{"tenant"})
+	admissionFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "infergate", Name: "admission_failures_total",
+		Help: "Requests rejected by bounded quota reason."}, []string{"reason"})
+	usageDeliveryFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "infergate", Name: "usage_delivery_failures_total",
+		Help: "Central usage stream delivery failures; local journal retains the event."})
+	httpRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "infergate", Name: "http_requests_total",
+		Help: "HTTP request count by matched route and status class."}, []string{"route", "status_class"})
+	httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "infergate", Name: "http_duration_seconds",
+		Help:    "End-to-end HTTP duration, including streaming responses.",
+		Buckets: []float64{0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120}}, []string{"route"})
+	streamFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "infergate", Name: "stream_failures_total",
+		Help: "Streaming responses ending before DONE or with an upstream error."}, []string{"reason"})
 )
+
+func ReportStreamFailure(reason string) { streamFailures.WithLabelValues(reason).Inc() }
+
+func ReportHTTP(route string, status int, duration time.Duration) {
+	if route == "" {
+		route = "unmatched"
+	}
+	statusClass := "5xx"
+	if status < 400 {
+		statusClass = "2xx_3xx"
+	} else if status < 500 {
+		statusClass = "4xx"
+	}
+	httpRequests.WithLabelValues(route, statusClass).Inc()
+	httpDuration.WithLabelValues(route).Observe(duration.Seconds())
+}
+
+func ReportAdmissionFailure(err error) {
+	reason := "unknown"
+	switch {
+	case errors.Is(err, auth.ErrRateLimited):
+		reason = "rpm"
+	case errors.Is(err, auth.ErrBusy):
+		reason = "tenant_concurrency"
+	case errors.Is(err, auth.ErrGlobalBusy):
+		reason = "global_concurrency"
+	case errors.Is(err, auth.ErrQuotaUnavailable):
+		reason = "quota_store"
+	}
+	admissionFailures.WithLabelValues(reason).Inc()
+}
+
+func ReportUsageDeliveryFailure() { usageDeliveryFailures.Inc() }
 
 func ObserveWorkload(req *model.Request) {
 	estimated := model.EstimatedPromptTokens(req)
